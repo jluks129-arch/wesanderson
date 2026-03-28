@@ -26,6 +26,7 @@
 #include "lvgl_helpers.h"
 
 #include "ui_app/ui_app.h"
+#include "screen_capture.h"
 //---------------------------------- MACROS -----------------------------------
 #define LV_TICK_PERIOD_MS (1U)
 
@@ -53,6 +54,12 @@ static void _gui_task(void *p_parameter);
 
 //------------------------- STATIC DATA & CONSTANTS ---------------------------
 static SemaphoreHandle_t p_gui_semaphore;
+
+static void _display_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_map)
+{
+    screen_capture_flush(area->x1, area->y1, area->x2, area->y2, (const uint16_t *)color_map);
+    disp_driver_flush(drv, area, color_map);
+}
 
 //------------------------------- GLOBAL DATA ---------------------------------
 
@@ -85,6 +92,7 @@ static void _gui_task(void *p_parameter)
 
     (void)p_parameter;
     p_gui_semaphore = xSemaphoreCreateMutex();
+    screen_capture_init();
 
     lv_init();
 
@@ -107,7 +115,7 @@ static void _gui_task(void *p_parameter)
     disp_drv.hor_res = LV_HOR_RES_MAX;
     disp_drv.ver_res = LV_VER_RES_MAX;
     lv_disp_drv_init(&disp_drv);
-    disp_drv.flush_cb = disp_driver_flush;
+    disp_drv.flush_cb = _display_flush_cb;
 
     disp_drv.draw_buf = &disp_draw_buf;
     lv_disp_drv_register(&disp_drv);

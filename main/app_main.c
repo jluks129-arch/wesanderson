@@ -9,11 +9,19 @@
 
 //--------------------------------- INCLUDES ----------------------------------
 #include "gui.h"
+#include "wifi_station.h"
+#include "web_server.h"
+#include "esp_event.h"
+#include "esp_netif.h"
+#include "esp_log.h"
+
 //---------------------------------- MACROS -----------------------------------
+static const char *TAG = "app_main";
 
 //-------------------------------- DATA TYPES ---------------------------------
 
 //---------------------- PRIVATE FUNCTION PROTOTYPES --------------------------
+static void _on_got_ip(void *arg, esp_event_base_t base, int32_t id, void *data);
 
 //------------------------- STATIC DATA & CONSTANTS ---------------------------
 
@@ -22,7 +30,20 @@
 //------------------------------ PUBLIC FUNCTIONS -----------------------------
 void app_main(void)
 {
-   gui_init();
+    wifi_station_init();
+
+    /* Start the web server once we have an IP address */
+    esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, _on_got_ip, NULL);
+
+    gui_init();
+}
+
+//---------------------------- PRIVATE FUNCTIONS ------------------------------
+static void _on_got_ip(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    ip_event_got_ip_t *event = (ip_event_got_ip_t *)data;
+    ESP_LOGI(TAG, "Connected — IP: " IPSTR, IP2STR(&event->ip_info.ip));
+    web_server_start();
 }
 
 //---------------------------- PRIVATE FUNCTIONS ------------------------------

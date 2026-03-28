@@ -20,8 +20,14 @@ extern "C" {
 
 //-------------------------------- DATA TYPES ---------------------------------
 
+typedef struct {
+    int screen;   /* 0=Welcome 1=Hero 2=World 3=Animal 4=Mood 5=Story */
+    int sel[4];   /* selected option index per param; -1 = not yet chosen */
+} ui_app_state_t;
+
 //---------------------- PUBLIC FUNCTION PROTOTYPES --------------------------
 void ui_app_init(void);
+void ui_app_get_state(ui_app_state_t *out);
 
 #ifdef __cplusplus
 }
