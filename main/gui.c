@@ -26,6 +26,7 @@
 #include "lvgl_helpers.h"
 
 #include "ui_app/ui_app.h"
+#include "ui_app/sd_card.h"
 #include "screen_capture.h"
 //---------------------------------- MACROS -----------------------------------
 #define LV_TICK_PERIOD_MS (1U)
@@ -95,6 +96,9 @@ static void _gui_task(void *p_parameter)
     screen_capture_init();
 
     lv_init();
+
+    /* Hold SD CS HIGH before any SPI clock pulses so the card stays in SPI mode */
+    sd_card_cs_pre_init();
 
     /* Initialize SPI or I2C bus used by the drivers */
     lvgl_driver_init();

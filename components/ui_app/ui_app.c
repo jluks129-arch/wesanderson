@@ -17,20 +17,16 @@
 
 //--------------------------------- INCLUDES ----------------------------------
 #include "ui_app.h"
+#include "audio_test.h"
+#include "sd_card.h"
 #include "lvgl.h"
+#include <stdbool.h>
 #include <stdio.h>
+#include <time.h>
 
 /* Custom fonts with Croatian (Latin Extended-A) character support */
 LV_FONT_DECLARE(lv_font_montserrat_14_hr);
 LV_FONT_DECLARE(lv_font_montserrat_16_hr);
-
-/* Character images */
-LV_IMG_DECLARE(ui_img_vitez);
-LV_IMG_DECLARE(ui_img_carobnjak);
-LV_IMG_DECLARE(ui_img_robot);
-LV_IMG_DECLARE(ui_img_vila);
-LV_IMG_DECLARE(ui_img_zmaj);
-LV_IMG_DECLARE(ui_img_pas);
 
 //---------------------------------- MACROS -----------------------------------
 #define SCREEN_W  320
@@ -50,11 +46,17 @@ LV_IMG_DECLARE(ui_img_pas);
 static void _build_welcome(lv_obj_t *scr);
 static void _build_param(lv_obj_t *scr, int param_idx);
 static void _build_story(lv_obj_t *scr);
+static void _build_audio_test(lv_obj_t *scr);
 static void _generate_story(void);
 static void _go_to(int idx);
 static void _start_btn_cb(lv_event_t *e);
 static void _option_btn_cb(lv_event_t *e);
 static void _again_btn_cb(lv_event_t *e);
+static void _speaker_test_btn_cb(lv_event_t *e);
+static void _audio_freq_btn_cb(lv_event_t *e);
+static void _audio_stop_btn_cb(lv_event_t *e);
+static void _audio_back_btn_cb(lv_event_t *e);
+static void _clock_tick_cb(lv_timer_t *t);
 
 //------------------------- STATIC DATA & CONSTANTS ---------------------------
 
@@ -92,15 +94,32 @@ static const char * const * const s_param_options[4] = {
     s_hero, s_world, s_animal, s_mood
 };
 
-/* Image arrays per param option (NULL = text fallback) */
-static const lv_img_dsc_t * const s_hero_img[4] = {
-    &ui_img_vitez, &ui_img_carobnjak, &ui_img_robot, &ui_img_vila
+/* SD card image paths — drive letter 'S' (ASCII 83) maps to LVGL FS-POSIX.
+ * LVGL strips the "S:" prefix and opens the remainder as a POSIX path,
+ * so "S:/sdcard/images/…" → fopen("/sdcard/images/…").
+ * NULL entries fall back to text-only buttons (e.g. mood has no images). */
+#define SD_IMG(name)  "S:/sdcard/images/" name
+
+static const char * const s_hero_file[4] = {
+    SD_IMG("WESKNIGHT.jpg"),
+    SD_IMG("WESWIZARD.jpg"),
+    SD_IMG("WESROBOT.jpg"),
+    SD_IMG("WESVILA.jpg"),
 };
-static const lv_img_dsc_t * const s_animal_img[4] = {
-    &ui_img_zmaj, &ui_img_pas, NULL, NULL
+static const char * const s_world_file[4] = {
+    SD_IMG("WESSUMA.jpeg"),
+    SD_IMG("WESSPACE.jpeg"),
+    SD_IMG("WESMORE.jpeg"),
+    SD_IMG("WESDVORAC.jpeg"),
 };
-static const lv_img_dsc_t * const * const s_param_images[4] = {
-    s_hero_img, NULL, s_animal_img, NULL
+static const char * const s_animal_file[4] = {
+    SD_IMG("WESZMAJ.jpg"),
+    SD_IMG("WESDOG.jpg"),
+    SD_IMG("WESOWL.jpg"),
+    SD_IMG("WESMACKA.jpg"),
+};
+static const char * const * const s_param_files[4] = {
+    s_hero_file, s_world_file, s_animal_file, NULL  /* mood: no images */
 };
 
 /* ── story templates (sprintf args: hero, animal, world_in) ────────────── */
@@ -131,10 +150,13 @@ static const char * const s_story_tmpl[4] = {
 };
 
 /* ── runtime state ─────────────────────────────────────────────────────── */
-static lv_obj_t *p_screens[6];
+static bool       s_sd_ready = false;   /* true once SD card is mounted    */
+static lv_obj_t *p_screens[7];          /* 0-5 story flow + 6 audio test */
 static int        s_sel[4];             /* selected option index per param */
 static int        s_current_screen = 0;
 static lv_obj_t  *p_story_label = NULL;
+static lv_obj_t  *p_audio_status_label = NULL;
+static lv_obj_t  *p_clock_label = NULL;
 static char       s_story_buf[512];
 
 //------------------------------- GLOBAL DATA ---------------------------------
@@ -150,7 +172,12 @@ void ui_app_get_state(ui_app_state_t *out)
 
 void ui_app_init(void)
 {
-    for(int i = 0; i < 6; i++) {
+    /* Mount SD card (VSPI bus is already up at this point).
+     * Screens are built immediately after; s_sd_ready controls whether
+     * buttons show images or fall back to text. */
+    s_sd_ready = (sd_card_init() == ESP_OK);
+
+    for(int i = 0; i < 7; i++) {
         p_screens[i] = lv_obj_create(NULL);
         lv_obj_set_size(p_screens[i], SCREEN_W, SCREEN_H);
         lv_obj_set_style_bg_color(p_screens[i], lv_color_hex(BG_COLOR), 0);
@@ -163,6 +190,21 @@ void ui_app_init(void)
         _build_param(p_screens[i + 1], i);
     }
     _build_story(p_screens[5]);
+    _build_audio_test(p_screens[6]);
+
+    audio_test_init();
+
+    /* Persistent clock label on lv_layer_top() — visible on every screen */
+    lv_obj_t *top_layer = lv_layer_top();
+    lv_obj_clear_flag(top_layer, LV_OBJ_FLAG_CLICKABLE);
+
+    p_clock_label = lv_label_create(top_layer);
+    lv_label_set_text(p_clock_label, "00:00:00");
+    lv_obj_set_style_text_color(p_clock_label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(p_clock_label, &lv_font_montserrat_14_hr, 0);
+    lv_obj_align(p_clock_label, LV_ALIGN_TOP_RIGHT, -6, 8);
+
+    lv_timer_create(_clock_tick_cb, 1000, NULL);
 
     lv_scr_load(p_screens[0]);
 }
@@ -189,8 +231,8 @@ static void _build_welcome(lv_obj_t *scr)
     lv_obj_align(sub, LV_ALIGN_TOP_MID, 0, 80);
 
     lv_obj_t *btn = lv_btn_create(scr);
-    lv_obj_set_size(btn, 180, 55);
-    lv_obj_align(btn, LV_ALIGN_BOTTOM_MID, 0, -30);
+    lv_obj_set_size(btn, 180, 50);
+    lv_obj_align(btn, LV_ALIGN_BOTTOM_MID, 0, -75);
     lv_obj_set_style_bg_color(btn, lv_color_hex(ACCENT), 0);
     lv_obj_set_style_radius(btn, 10, 0);
     lv_obj_add_event_cb(btn, _start_btn_cb, LV_EVENT_CLICKED, NULL);
@@ -200,6 +242,22 @@ static void _build_welcome(lv_obj_t *scr)
     lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
     lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16_hr, 0);
     lv_obj_center(lbl);
+
+    /* Speaker test button */
+    lv_obj_t *test_btn = lv_btn_create(scr);
+    lv_obj_set_size(test_btn, 180, 36);
+    lv_obj_align(test_btn, LV_ALIGN_BOTTOM_MID, 0, -25);
+    lv_obj_set_style_bg_color(test_btn, lv_color_hex(DARK_BLUE), 0);
+    lv_obj_set_style_border_color(test_btn, lv_color_hex(ACCENT), 0);
+    lv_obj_set_style_border_width(test_btn, 1, 0);
+    lv_obj_set_style_radius(test_btn, 8, 0);
+    lv_obj_add_event_cb(test_btn, _speaker_test_btn_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *test_lbl = lv_label_create(test_btn);
+    lv_label_set_text(test_lbl, "Test zvucnika");
+    lv_obj_set_style_text_color(test_lbl, lv_color_hex(0xCCCCCC), 0);
+    lv_obj_set_style_text_font(test_lbl, &lv_font_montserrat_14_hr, 0);
+    lv_obj_center(test_lbl);
 }
 
 static void _build_param(lv_obj_t *scr, int param_idx)
@@ -239,15 +297,35 @@ static void _build_param(lv_obj_t *scr, int param_idx)
         lv_obj_set_style_border_width(btn, 1, 0);
         lv_obj_set_style_radius(btn, 8, 0);
 
-        const lv_img_dsc_t * const *imgs   = s_param_images[param_idx];
-        const lv_img_dsc_t         *img_src = imgs ? imgs[i] : NULL;
+        const char * const *files   = s_param_files[param_idx];
+        const char         *img_path = (s_sd_ready && files) ? files[i] : NULL;
 
-        if(img_src) {
+        if(img_path) {
+            /* Image fills the button; overflow is clipped by default in LVGL 8 */
             lv_obj_set_style_pad_all(btn, 0, 0);
+            lv_obj_clear_flag(btn, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+
             lv_obj_t *img = lv_img_create(btn);
-            lv_img_set_src(img, img_src);
+            lv_img_set_src(img, img_path);
             lv_obj_set_size(img, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
             lv_obj_center(img);
+
+            /* Semi-transparent name label at the bottom of the button */
+            lv_obj_t *lbl_bg = lv_obj_create(btn);
+            lv_obj_set_size(lbl_bg, BW, 22);
+            lv_obj_align(lbl_bg, LV_ALIGN_BOTTOM_MID, 0, 0);
+            lv_obj_set_style_bg_color(lbl_bg, lv_color_hex(0x000000), 0);
+            lv_obj_set_style_bg_opa(lbl_bg, LV_OPA_60, 0);
+            lv_obj_set_style_border_width(lbl_bg, 0, 0);
+            lv_obj_set_style_radius(lbl_bg, 0, 0);
+            lv_obj_set_style_pad_all(lbl_bg, 2, 0);
+            lv_obj_clear_flag(lbl_bg, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+            lv_obj_t *lbl = lv_label_create(lbl_bg);
+            lv_label_set_text(lbl, s_param_options[param_idx][i]);
+            lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
+            lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14_hr, 0);
+            lv_obj_center(lbl);
         } else {
             lv_obj_t *lbl = lv_label_create(btn);
             lv_label_set_text(lbl, s_param_options[param_idx][i]);
@@ -355,6 +433,146 @@ static void _again_btn_cb(lv_event_t *e)
 {
     (void)e;
     _go_to(0);
+}
+
+/* ── audio test screen ────────────────────────────────────────────────── */
+
+static void _build_audio_test(lv_obj_t *scr)
+{
+    /* Title bar */
+    lv_obj_t *bar = lv_obj_create(scr);
+    lv_obj_set_size(bar, SCREEN_W, 35);
+    lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_set_style_bg_color(bar, lv_color_hex(DARK_BLUE), 0);
+    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(bar, 0, 0);
+    lv_obj_set_style_radius(bar, 0, 0);
+    lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *title = lv_label_create(bar);
+    lv_label_set_text(title, "Test Zvucnika");
+    lv_obj_set_style_text_color(title, lv_color_white(), 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16_hr, 0);
+    lv_obj_center(title);
+
+    /* Status label */
+    p_audio_status_label = lv_label_create(scr);
+    lv_label_set_text(p_audio_status_label, "Status: Zaustavljeno");
+    lv_obj_set_style_text_color(p_audio_status_label, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_set_style_text_font(p_audio_status_label, &lv_font_montserrat_14_hr, 0);
+    lv_obj_align(p_audio_status_label, LV_ALIGN_TOP_MID, 0, 45);
+
+    /* 2×2 frequency button grid */
+    static const uint32_t s_freqs[4]             = {220, 440, 880, 1760};
+    static const char * const s_freq_labels[4]   = {"220 Hz", "440 Hz", "880 Hz", "1760 Hz"};
+
+    static const int BW = 140, BH = 50, H_GAP = 10, V_GAP = 5;
+    int x0 = (SCREEN_W - 2 * BW - H_GAP) / 2;  /* = 15 */
+    int y0 = 70;
+
+    for(int i = 0; i < 4; i++) {
+        int col = i % 2;
+        int row = i / 2;
+        int x   = x0 + col * (BW + H_GAP);
+        int y   = y0 + row * (BH + V_GAP);
+
+        lv_obj_t *btn = lv_btn_create(scr);
+        lv_obj_set_size(btn, BW, BH);
+        lv_obj_align(btn, LV_ALIGN_TOP_LEFT, x, y);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(MID_BLUE), 0);
+        lv_obj_set_style_border_color(btn, lv_color_hex(ACCENT), 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_radius(btn, 8, 0);
+
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, s_freq_labels[i]);
+        lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16_hr, 0);
+        lv_obj_center(lbl);
+
+        lv_obj_add_event_cb(btn, _audio_freq_btn_cb, LV_EVENT_CLICKED,
+                            (void *)(uintptr_t)s_freqs[i]);
+    }
+
+    /* Stop button */
+    lv_obj_t *stop_btn = lv_btn_create(scr);
+    lv_obj_set_size(stop_btn, 130, 36);
+    lv_obj_align(stop_btn, LV_ALIGN_BOTTOM_LEFT, 15, -10);
+    lv_obj_set_style_bg_color(stop_btn, lv_color_hex(ACCENT), 0);
+    lv_obj_set_style_radius(stop_btn, 8, 0);
+    lv_obj_add_event_cb(stop_btn, _audio_stop_btn_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *stop_lbl = lv_label_create(stop_btn);
+    lv_label_set_text(stop_lbl, "Stop");
+    lv_obj_set_style_text_color(stop_lbl, lv_color_white(), 0);
+    lv_obj_set_style_text_font(stop_lbl, &lv_font_montserrat_16_hr, 0);
+    lv_obj_center(stop_lbl);
+
+    /* Back button */
+    lv_obj_t *back_btn = lv_btn_create(scr);
+    lv_obj_set_size(back_btn, 130, 36);
+    lv_obj_align(back_btn, LV_ALIGN_BOTTOM_RIGHT, -15, -10);
+    lv_obj_set_style_bg_color(back_btn, lv_color_hex(DARK_BLUE), 0);
+    lv_obj_set_style_border_color(back_btn, lv_color_hex(0x555555), 0);
+    lv_obj_set_style_border_width(back_btn, 1, 0);
+    lv_obj_set_style_radius(back_btn, 8, 0);
+    lv_obj_add_event_cb(back_btn, _audio_back_btn_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *back_lbl = lv_label_create(back_btn);
+    lv_label_set_text(back_lbl, "Nazad");
+    lv_obj_set_style_text_color(back_lbl, lv_color_white(), 0);
+    lv_obj_set_style_text_font(back_lbl, &lv_font_montserrat_16_hr, 0);
+    lv_obj_center(back_lbl);
+}
+
+static void _speaker_test_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    _go_to(6);
+}
+
+static void _audio_freq_btn_cb(lv_event_t *e)
+{
+    uint32_t freq = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
+    audio_test_play_tone(freq);
+
+    if(p_audio_status_label) {
+        static char status_buf[32];
+        snprintf(status_buf, sizeof(status_buf), "Status: %lu Hz", (unsigned long)freq);
+        lv_label_set_text(p_audio_status_label, status_buf);
+    }
+}
+
+static void _audio_stop_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    audio_test_stop();
+    if(p_audio_status_label) {
+        lv_label_set_text(p_audio_status_label, "Status: Zaustavljeno");
+    }
+}
+
+static void _audio_back_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    audio_test_stop();
+    if(p_audio_status_label) {
+        lv_label_set_text(p_audio_status_label, "Status: Zaustavljeno");
+    }
+    _go_to(0);
+}
+
+/* ── persistent clock (top layer) ────────────────────────────────────── */
+
+static void _clock_tick_cb(lv_timer_t *t)
+{
+    (void)t;
+    time_t now       = time(NULL);
+    struct tm *tm_info = gmtime(&now);
+    static char buf[9];   /* "HH:MM:SS\0" */
+    snprintf(buf, sizeof(buf), "%02d:%02d:%02d",
+             tm_info->tm_hour, tm_info->tm_min, tm_info->tm_sec);
+    lv_label_set_text(p_clock_label, buf);
 }
 
 //---------------------------- INTERRUPT HANDLERS -----------------------------

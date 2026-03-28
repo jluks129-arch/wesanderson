@@ -21,7 +21,7 @@ extern "C" {
 //-------------------------------- DATA TYPES ---------------------------------
 
 typedef struct {
-    int screen;   /* 0=Welcome 1=Hero 2=World 3=Animal 4=Mood 5=Story */
+    int screen;   /* 0=Welcome 1=Hero 2=World 3=Animal 4=Mood 5=Story 6=AudioTest */
     int sel[4];   /* selected option index per param; -1 = not yet chosen */
 } ui_app_state_t;
 
