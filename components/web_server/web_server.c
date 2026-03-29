@@ -10,6 +10,7 @@
 //--------------------------------- INCLUDES ----------------------------------
 #include "web_server.h"
 #include "ui_app.h"
+#include "babyphone.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include <stdio.h>
@@ -21,9 +22,9 @@ static const char *TAG = "web_server";
 //------------------------- STATIC DATA & CONSTANTS --------------------------
 static httpd_handle_t s_server = NULL;
 
-static const char * const SCREEN_NAME[6] = {
+static const char * const SCREEN_NAME[7] = {
     "Welcome", "Picking hero", "Picking world",
-    "Picking animal", "Picking mood", "Reading story",
+    "Picking animal", "Picking mood", "Reading story", "Babyphone",
 };
 static const char * const PARAM_NAME[4]  = { "Hero", "World", "Animal", "Mood" };
 static const char * const OPTIONS[4][4]  = {
@@ -35,6 +36,20 @@ static const char * const OPTIONS[4][4]  = {
 
 //---------------------- PRIVATE FUNCTION PROTOTYPES -------------------------
 static esp_err_t _root_handler(httpd_req_t *req);
+static esp_err_t _baby_get_handler(httpd_req_t *req);
+static esp_err_t _baby_post_handler(httpd_req_t *req);
+static esp_err_t _baby_active_handler(httpd_req_t *req);
+
+static esp_err_t _baby_active_handler(httpd_req_t *req)
+{
+    if (babyphone_is_running()) {
+        httpd_resp_send(req, "1", 1);
+    } else {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_send(req, "0", 1);
+    }
+    return ESP_OK;
+}
 
 //------------------------------ PUBLIC FUNCTIONS ----------------------------
 esp_err_t web_server_start(void)
@@ -57,6 +72,13 @@ esp_err_t web_server_start(void)
 
     httpd_uri_t root = { .uri = "/", .method = HTTP_GET, .handler = _root_handler };
     httpd_register_uri_handler(s_server, &root);
+
+    httpd_uri_t baby_get    = { .uri = "/baby",        .method = HTTP_GET,  .handler = _baby_get_handler    };
+    httpd_uri_t baby_post   = { .uri = "/baby",        .method = HTTP_POST, .handler = _baby_post_handler   };
+    httpd_uri_t baby_active = { .uri = "/baby/active", .method = HTTP_GET,  .handler = _baby_active_handler };
+    httpd_register_uri_handler(s_server, &baby_get);
+    httpd_register_uri_handler(s_server, &baby_post);
+    httpd_register_uri_handler(s_server, &baby_active);
 
     ESP_LOGI(TAG, "HTTP server started");
     return ESP_OK;
@@ -108,6 +130,10 @@ static esp_err_t _root_handler(httpd_req_t *req)
     }
     sl += snprintf(sels + sl, sizeof(sels) - sl, "</ul>");
 
+    /* Clamp screen index to SCREEN_NAME array bounds */
+    int scr = state.screen;
+    if (scr < 0 || scr >= 7) scr = 0;
+
     n = snprintf(buf, sizeof(buf),
         "<!DOCTYPE html><html><head>"
         "<meta charset='utf-8'>"
@@ -137,10 +163,63 @@ static esp_err_t _root_handler(httpd_req_t *req)
         "<div class='note'>Refreshes every 2 s</div>"
         "</body></html>",
         steps,
-        SCREEN_NAME[state.screen],
+        SCREEN_NAME[scr],
         sels);
 
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, buf, n);
+    return ESP_OK;
+}
+
+static esp_err_t _baby_get_handler(httpd_req_t *req)
+{
+    const uint8_t *buf;
+    size_t         len;
+
+    if (!babyphone_get_image(&buf, &len)) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND,
+                            "No image available yet — wait for the first capture.");
+        return ESP_OK;
+    }
+
+    httpd_resp_set_type(req, "image/jpeg");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    esp_err_t ret = httpd_resp_send(req, (const char *)buf, (ssize_t)len);
+    babyphone_release_image();
+    return ret;
+}
+
+static esp_err_t _baby_post_handler(httpd_req_t *req)
+{
+    size_t content_len = req->content_len;
+    if (content_len == 0 || content_len > CAM_JPEG_BUF_SIZE) {
+        ESP_LOGW(TAG, "POST /baby: bad content_len=%zu", content_len);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid content length");
+        return ESP_OK;
+    }
+
+    uint8_t *buf = malloc(content_len);
+    if (!buf) {
+        ESP_LOGE(TAG, "POST /baby: OOM");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_FAIL;
+    }
+
+    int received = 0;
+    while (received < (int)content_len) {
+        int r = httpd_req_recv(req, (char *)buf + received,
+                               (int)content_len - received);
+        if (r < 0) {
+            if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
+            free(buf);
+            return ESP_FAIL;
+        }
+        received += r;
+    }
+
+    babyphone_store_image(buf, content_len);
+    free(buf);
+
+    httpd_resp_send(req, NULL, 0);
     return ESP_OK;
 }

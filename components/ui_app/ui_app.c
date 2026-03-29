@@ -1,32 +1,54 @@
 /**
  * @file ui_app.c
  *
- * @brief Children's story generator for the BLDK.
+ * @brief Children's story player + Babyphone for the BLDK.
  *
- * The child picks four parameters (hero, world, animal, mood) via large
- * touch buttons, then reads a personalised Croatian story on screen.
+ * The child picks three parameters (hero, world, animal) via large
+ * touch buttons, then the matching MP3 from the SD card is played.
  *
  * Screens:
  *   0 – Welcome
  *   1 – Hero selection
  *   2 – World selection
  *   3 – Animal selection
- *   4 – Mood selection
- *   5 – Story display
+ *   4 – Story / Now Playing
+ *   5 – Babyphone
  */
 
 //--------------------------------- INCLUDES ----------------------------------
 #include "ui_app.h"
-#include "audio_test.h"
-#include "sd_card.h"
+#include "babyphone.h"
+#include "story_player.h"
 #include "lvgl.h"
-#include <stdbool.h>
+#include "esp_netif.h"
 #include <stdio.h>
-#include <time.h>
+#include <string.h>
 
 /* Custom fonts with Croatian (Latin Extended-A) character support */
 LV_FONT_DECLARE(lv_font_montserrat_14_hr);
 LV_FONT_DECLARE(lv_font_montserrat_16_hr);
+
+/* Home screen icons */
+LV_IMG_DECLARE(ui_img_book);
+LV_IMG_DECLARE(ui_img_camera);
+
+/* Story scene images */
+LV_IMG_DECLARE(ui_img_vitezsumapas);
+LV_IMG_DECLARE(ui_img_robotsvemirsova);
+
+/* Character images */
+LV_IMG_DECLARE(ui_img_vitez);
+LV_IMG_DECLARE(ui_img_carobnjak);
+LV_IMG_DECLARE(ui_img_robot);
+LV_IMG_DECLARE(ui_img_vila);
+LV_IMG_DECLARE(ui_img_zmaj);
+LV_IMG_DECLARE(ui_img_pas);
+LV_IMG_DECLARE(ui_img_sova);
+LV_IMG_DECLARE(ui_img_macka);
+LV_IMG_DECLARE(ui_img_svemir);
+LV_IMG_DECLARE(ui_img_dvorac);
+LV_IMG_DECLARE(ui_img_more);
+LV_IMG_DECLARE(ui_img_suma);
 
 //---------------------------------- MACROS -----------------------------------
 #define SCREEN_W  320
@@ -40,33 +62,31 @@ LV_FONT_DECLARE(lv_font_montserrat_16_hr);
 #define SEL_HERO   0
 #define SEL_WORLD  1
 #define SEL_ANIMAL 2
-#define SEL_MOOD   3
 
 //---------------------- PRIVATE FUNCTION PROTOTYPES --------------------------
 static void _build_welcome(lv_obj_t *scr);
 static void _build_param(lv_obj_t *scr, int param_idx);
 static void _build_story(lv_obj_t *scr);
-static void _build_audio_test(lv_obj_t *scr);
-static void _generate_story(void);
+static void _build_babyphone(lv_obj_t *scr);
 static void _go_to(int idx);
+static void _update_baby_url(void);
 static void _start_btn_cb(lv_event_t *e);
+static void _test_audio_btn_cb(lv_event_t *e);
 static void _option_btn_cb(lv_event_t *e);
 static void _again_btn_cb(lv_event_t *e);
-static void _speaker_test_btn_cb(lv_event_t *e);
-static void _audio_freq_btn_cb(lv_event_t *e);
-static void _audio_stop_btn_cb(lv_event_t *e);
-static void _audio_back_btn_cb(lv_event_t *e);
-static void _clock_tick_cb(lv_timer_t *t);
+static void _babyphone_btn_cb(lv_event_t *e);
+static void _baby_stop_btn_cb(lv_event_t *e);
+static void _baby_back_btn_cb(lv_event_t *e);
+static void _baby_ui_refresh_cb(void *arg);
 
 //------------------------- STATIC DATA & CONSTANTS ---------------------------
 
 /* ── parameter labels ──────────────────────────────────────────────────── */
 
-static const char * const s_param_title[4] = {
+static const char * const s_param_title[3] = {
     "Odaberi junaka",
     "Odaberi svijet",
     "Odaberi životinju",
-    "Odaberi ugođaj",
 };
 
 static const char * const s_hero[4] = {
@@ -77,87 +97,45 @@ static const char * const s_world[4] = {
     "Šuma", "Svemir", "More", "Dvorac"
 };
 
-static const char * const s_world_in[4] = {
-    "u šumi", "u svemiru", "na moru", "u dvorcu"
-};
 
 static const char * const s_animal[4] = {
     "Zmaj", "Pas", "Sova", "Mačka"
 };
 
-static const char * const s_mood[4] = {
-    "Smješno", "Strašno", "Uzbudljivo", "Dirljivo"
-};
-
 /* Pointer array for the param screens — indexed by param_idx */
-static const char * const * const s_param_options[4] = {
-    s_hero, s_world, s_animal, s_mood
+static const char * const * const s_param_options[3] = {
+    s_hero, s_world, s_animal
 };
 
-/* SD card image paths — drive letter 'S' (ASCII 83) maps to LVGL FS-POSIX.
- * LVGL strips the "S:" prefix and opens the remainder as a POSIX path,
- * so "S:/sdcard/images/…" → fopen("/sdcard/images/…").
- * NULL entries fall back to text-only buttons (e.g. mood has no images). */
-#define SD_IMG(name)  "S:/sdcard/images/" name
-
-static const char * const s_hero_file[4] = {
-    SD_IMG("WESKNIGHT.jpg"),
-    SD_IMG("WESWIZARD.jpg"),
-    SD_IMG("WESROBOT.jpg"),
-    SD_IMG("WESVILA.jpg"),
+/* Image arrays per param option (NULL = text fallback) */
+static const lv_img_dsc_t * const s_hero_img[4] = {
+    &ui_img_vitez, &ui_img_carobnjak, &ui_img_robot, &ui_img_vila
 };
-static const char * const s_world_file[4] = {
-    SD_IMG("WESSUMA.jpeg"),
-    SD_IMG("WESSPACE.jpeg"),
-    SD_IMG("WESMORE.jpeg"),
-    SD_IMG("WESDVORAC.jpeg"),
+static const lv_img_dsc_t * const s_animal_img[4] = {
+    &ui_img_zmaj, &ui_img_pas, &ui_img_sova, &ui_img_macka
 };
-static const char * const s_animal_file[4] = {
-    SD_IMG("WESZMAJ.jpg"),
-    SD_IMG("WESDOG.jpg"),
-    SD_IMG("WESOWL.jpg"),
-    SD_IMG("WESMACKA.jpg"),
-};
-static const char * const * const s_param_files[4] = {
-    s_hero_file, s_world_file, s_animal_file, NULL  /* mood: no images */
+static const lv_img_dsc_t * const s_world_img[4] = {
+    &ui_img_suma, &ui_img_svemir, &ui_img_more, &ui_img_dvorac
 };
 
-/* ── story templates (sprintf args: hero, animal, world_in) ────────────── */
-static const char * const s_story_tmpl[4] = {
-    /* Smješno */
-    "Jednog dana %s i %s otišli su %s.\n"
-    "Tamo su pronašli čarobni šešir koji pjeva!\n"
-    "Pjevali su tako glasno da je cijelo\n"
-    "selo čulo. Najsmješniji dan ikad!",
-
-    /* Strašno */
-    "Bila je mračna noć kad su %s i %s\n"
-    "ušli %s. Nešto je šuštalo u tami...\n"
-    "Ali to je bila samo baka s lampom!\n"
-    "Svi su se nasmijali i krenuli kući.",
-
-    /* Uzbudljivo */
-    "%s i %s otkrili su staru kartu %s.\n"
-    "Brzinom munje krenuli su u potragu!\n"
-    "Pronašli su zlatnu škrinju punu blaga.\n"
-    "Najveće uzbuđenje u životu!",
-
-    /* Dirljivo */
-    "%s je primijetio da je %s tužan.\n"
-    "Zajedno su otišli %s na šetnju.\n"
-    "Sunce je grijalo i ptice su pjevale.\n"
-    "Na kraju su se zagrljali — sve je dobro.",
+static const lv_img_dsc_t * const * const s_param_images[3] = {
+    s_hero_img, s_world_img, s_animal_img
 };
 
 /* ── runtime state ─────────────────────────────────────────────────────── */
-static bool       s_sd_ready = false;   /* true once SD card is mounted    */
-static lv_obj_t *p_screens[7];          /* 0-5 story flow + 6 audio test */
-static int        s_sel[4];             /* selected option index per param */
+static lv_obj_t *p_screens[6];         /* 0-3 selection, 4 story, 5 babyphone */
+static int        s_sel[3];            /* selected option index per param */
 static int        s_current_screen = 0;
-static lv_obj_t  *p_story_label = NULL;
-static lv_obj_t  *p_audio_status_label = NULL;
-static lv_obj_t  *p_clock_label = NULL;
-static char       s_story_buf[512];
+static lv_obj_t  *p_story_label    = NULL;
+static lv_obj_t  *p_story_img      = NULL;
+static lv_obj_t  *p_story_cont     = NULL;
+static lv_obj_t  *p_story_ticker   = NULL;
+static char       s_story_buf[128];
+
+/* Babyphone screen label pointers — updated by _baby_ui_refresh_cb */
+static lv_obj_t  *p_baby_status_lbl = NULL;
+static lv_obj_t  *p_baby_time_lbl   = NULL;
+static lv_obj_t  *p_baby_url_lbl    = NULL;
 
 //------------------------------- GLOBAL DATA ---------------------------------
 
@@ -165,19 +143,15 @@ static char       s_story_buf[512];
 void ui_app_get_state(ui_app_state_t *out)
 {
     out->screen = s_current_screen;
-    for(int i = 0; i < 4; i++) {
+    for(int i = 0; i < 3; i++) {
         out->sel[i] = (s_current_screen > i + 1) ? s_sel[i] : -1;
     }
+    out->sel[3] = -1;   /* mood removed — always -1 for web server compat */
 }
 
 void ui_app_init(void)
 {
-    /* Mount SD card (VSPI bus is already up at this point).
-     * Screens are built immediately after; s_sd_ready controls whether
-     * buttons show images or fall back to text. */
-    s_sd_ready = (sd_card_init() == ESP_OK);
-
-    for(int i = 0; i < 7; i++) {
+    for(int i = 0; i < 6; i++) {
         p_screens[i] = lv_obj_create(NULL);
         lv_obj_set_size(p_screens[i], SCREEN_W, SCREEN_H);
         lv_obj_set_style_bg_color(p_screens[i], lv_color_hex(BG_COLOR), 0);
@@ -186,25 +160,15 @@ void ui_app_init(void)
     }
 
     _build_welcome(p_screens[0]);
-    for(int i = 0; i < 4; i++) {
+    for(int i = 0; i < 3; i++) {
         _build_param(p_screens[i + 1], i);
     }
-    _build_story(p_screens[5]);
-    _build_audio_test(p_screens[6]);
+    _build_story(p_screens[4]);
+    _build_babyphone(p_screens[5]);
 
-    audio_test_init();
-
-    /* Persistent clock label on lv_layer_top() — visible on every screen */
-    lv_obj_t *top_layer = lv_layer_top();
-    lv_obj_clear_flag(top_layer, LV_OBJ_FLAG_CLICKABLE);
-
-    p_clock_label = lv_label_create(top_layer);
-    lv_label_set_text(p_clock_label, "00:00:00");
-    lv_obj_set_style_text_color(p_clock_label, lv_color_white(), 0);
-    lv_obj_set_style_text_font(p_clock_label, &lv_font_montserrat_14_hr, 0);
-    lv_obj_align(p_clock_label, LV_ALIGN_TOP_RIGHT, -6, 8);
-
-    lv_timer_create(_clock_tick_cb, 1000, NULL);
+    babyphone_init();
+    babyphone_set_ui_refresh_cb(_baby_ui_refresh_cb);
+    story_player_init();
 
     lv_scr_load(p_screens[0]);
 }
@@ -213,51 +177,56 @@ void ui_app_init(void)
 
 /* ── screen builders ──────────────────────────────────────────────────── */
 
-static void _build_welcome(lv_obj_t *scr)
+static void _make_icon_btn(lv_obj_t *scr, int x, int y, int size,
+                           const lv_img_dsc_t *icon, const char *label,
+                           lv_color_t bg, lv_event_cb_t cb)
 {
-    lv_obj_t *title = lv_label_create(scr);
-    lv_label_set_text(title, "Stvori svoju pričicu!");
-    lv_obj_set_style_text_color(title, lv_color_hex(ACCENT), 0);
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_16_hr, 0);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 35);
-
-    lv_obj_t *sub = lv_label_create(scr);
-    lv_label_set_text(sub,
-        "Odaberi junaka, svijet,\n"
-        "životinju i ugođaj!");
-    lv_obj_set_style_text_color(sub, lv_color_hex(0xAAAAAA), 0);
-    lv_obj_set_style_text_font(sub, &lv_font_montserrat_14_hr, 0);
-    lv_obj_set_style_text_align(sub, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(sub, LV_ALIGN_TOP_MID, 0, 80);
-
     lv_obj_t *btn = lv_btn_create(scr);
-    lv_obj_set_size(btn, 180, 50);
-    lv_obj_align(btn, LV_ALIGN_BOTTOM_MID, 0, -75);
-    lv_obj_set_style_bg_color(btn, lv_color_hex(ACCENT), 0);
-    lv_obj_set_style_radius(btn, 10, 0);
-    lv_obj_add_event_cb(btn, _start_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_set_size(btn, size, size);
+    lv_obj_set_pos(btn, x, y);
+    lv_obj_set_style_bg_color(btn, bg, 0);
+    lv_obj_set_style_radius(btn, 12, 0);
+    lv_obj_set_style_shadow_width(btn, 8, 0);
+    lv_obj_set_style_shadow_color(btn, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_shadow_opa(btn, LV_OPA_40, 0);
+    lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *img = lv_img_create(btn);
+    lv_img_set_src(img, icon);
+    lv_obj_align(img, LV_ALIGN_CENTER, 0, -10);
 
     lv_obj_t *lbl = lv_label_create(btn);
-    lv_label_set_text(lbl, "Kreni!");
+    lv_label_set_text(lbl, label);
     lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
     lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16_hr, 0);
-    lv_obj_center(lbl);
+    lv_obj_align(lbl, LV_ALIGN_BOTTOM_MID, 0, -6);
+}
 
-    /* Speaker test button */
-    lv_obj_t *test_btn = lv_btn_create(scr);
-    lv_obj_set_size(test_btn, 180, 36);
-    lv_obj_align(test_btn, LV_ALIGN_BOTTOM_MID, 0, -25);
-    lv_obj_set_style_bg_color(test_btn, lv_color_hex(DARK_BLUE), 0);
-    lv_obj_set_style_border_color(test_btn, lv_color_hex(ACCENT), 0);
-    lv_obj_set_style_border_width(test_btn, 1, 0);
-    lv_obj_set_style_radius(test_btn, 8, 0);
-    lv_obj_add_event_cb(test_btn, _speaker_test_btn_cb, LV_EVENT_CLICKED, NULL);
+static void _build_welcome(lv_obj_t *scr)
+{
+    /* Title */
+    lv_obj_t *title = lv_label_create(scr);
+    lv_label_set_text(title, "Telefon za bebe");
+    lv_obj_set_style_text_color(title, lv_color_hex(ACCENT), 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16_hr, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 18);
 
-    lv_obj_t *test_lbl = lv_label_create(test_btn);
-    lv_label_set_text(test_lbl, "Test zvucnika");
-    lv_obj_set_style_text_color(test_lbl, lv_color_hex(0xCCCCCC), 0);
-    lv_obj_set_style_text_font(test_lbl, &lv_font_montserrat_14_hr, 0);
-    lv_obj_center(test_lbl);
+    /* Two square buttons, side by side, centred */
+    static const int BTN = 120;
+    static const int GAP = 20;
+    int total_w = 2 * BTN + GAP;
+    int x0 = (SCREEN_W - total_w) / 2;          /* left edge of left btn  */
+    int x1 = x0 + BTN + GAP;                    /* left edge of right btn */
+    int y  = (SCREEN_H - BTN) / 2 + 10;         /* vertically centred     */
+
+    _make_icon_btn(scr, x0, y, BTN,
+                   &ui_img_book, "Priča",
+                   lv_color_hex(ACCENT), _start_btn_cb);
+
+    _make_icon_btn(scr, x1, y, BTN,
+                   &ui_img_camera, "Babyphone",
+                   lv_color_hex(DARK_BLUE), _babyphone_btn_cb);
 }
 
 static void _build_param(lv_obj_t *scr, int param_idx)
@@ -297,35 +266,15 @@ static void _build_param(lv_obj_t *scr, int param_idx)
         lv_obj_set_style_border_width(btn, 1, 0);
         lv_obj_set_style_radius(btn, 8, 0);
 
-        const char * const *files   = s_param_files[param_idx];
-        const char         *img_path = (s_sd_ready && files) ? files[i] : NULL;
+        const lv_img_dsc_t * const *imgs   = s_param_images[param_idx];
+        const lv_img_dsc_t         *img_src = imgs ? imgs[i] : NULL;
 
-        if(img_path) {
-            /* Image fills the button; overflow is clipped by default in LVGL 8 */
+        if(img_src) {
             lv_obj_set_style_pad_all(btn, 0, 0);
-            lv_obj_clear_flag(btn, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
-
             lv_obj_t *img = lv_img_create(btn);
-            lv_img_set_src(img, img_path);
+            lv_img_set_src(img, img_src);
             lv_obj_set_size(img, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
             lv_obj_center(img);
-
-            /* Semi-transparent name label at the bottom of the button */
-            lv_obj_t *lbl_bg = lv_obj_create(btn);
-            lv_obj_set_size(lbl_bg, BW, 22);
-            lv_obj_align(lbl_bg, LV_ALIGN_BOTTOM_MID, 0, 0);
-            lv_obj_set_style_bg_color(lbl_bg, lv_color_hex(0x000000), 0);
-            lv_obj_set_style_bg_opa(lbl_bg, LV_OPA_60, 0);
-            lv_obj_set_style_border_width(lbl_bg, 0, 0);
-            lv_obj_set_style_radius(lbl_bg, 0, 0);
-            lv_obj_set_style_pad_all(lbl_bg, 2, 0);
-            lv_obj_clear_flag(lbl_bg, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
-
-            lv_obj_t *lbl = lv_label_create(lbl_bg);
-            lv_label_set_text(lbl, s_param_options[param_idx][i]);
-            lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
-            lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14_hr, 0);
-            lv_obj_center(lbl);
         } else {
             lv_obj_t *lbl = lv_label_create(btn);
             lv_label_set_text(lbl, s_param_options[param_idx][i]);
@@ -343,30 +292,52 @@ static void _build_param(lv_obj_t *scr, int param_idx)
 
 static void _build_story(lv_obj_t *scr)
 {
+    /* Layout (screen 320x240):
+       y=5   header "Tvoja pričica:"
+       y=25  content area h=133  (text panel OR scene image)
+       y=160 scrolling ticker h=22
+       y=199 "Još jednom!" button (BOTTOM_MID -5, h=36)          */
+
     lv_obj_t *hdr = lv_label_create(scr);
     lv_label_set_text(hdr, "Tvoja pričica:");
     lv_obj_set_style_text_color(hdr, lv_color_hex(ACCENT), 0);
     lv_obj_set_style_text_font(hdr, &lv_font_montserrat_16_hr, 0);
     lv_obj_align(hdr, LV_ALIGN_TOP_MID, 0, 5);
 
-    /* Scrollable container for story text */
-    lv_obj_t *cont = lv_obj_create(scr);
-    lv_obj_set_size(cont, SCREEN_W - 10, 165);
-    lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, 28);
-    lv_obj_set_style_bg_color(cont, lv_color_hex(DARK_BLUE), 0);
-    lv_obj_set_style_bg_opa(cont, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(cont, 0, 0);
-    lv_obj_set_style_radius(cont, 6, 0);
-    lv_obj_set_style_pad_all(cont, 8, 0);
+    /* Text panel — shown for regular (no-image) combinations */
+    p_story_cont = lv_obj_create(scr);
+    lv_obj_set_size(p_story_cont, SCREEN_W - 10, 133);
+    lv_obj_align(p_story_cont, LV_ALIGN_TOP_MID, 0, 25);
+    lv_obj_set_style_bg_color(p_story_cont, lv_color_hex(DARK_BLUE), 0);
+    lv_obj_set_style_bg_opa(p_story_cont, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(p_story_cont, 0, 0);
+    lv_obj_set_style_radius(p_story_cont, 6, 0);
+    lv_obj_set_style_pad_all(p_story_cont, 8, 0);
 
-    p_story_label = lv_label_create(cont);
+    p_story_label = lv_label_create(p_story_cont);
     lv_label_set_long_mode(p_story_label, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(p_story_label, SCREEN_W - 26);
     lv_label_set_text(p_story_label, "");
     lv_obj_set_style_text_color(p_story_label, lv_color_white(), 0);
     lv_obj_set_style_text_font(p_story_label, &lv_font_montserrat_14_hr, 0);
 
-    /* "Again" button */
+    /* Scene image — placed directly on screen, same footprint as the panel */
+    p_story_img = lv_img_create(scr);
+    lv_obj_set_pos(p_story_img, (SCREEN_W - 199) / 2, 25);  /* centre 199px wide image */
+    lv_obj_add_flag(p_story_img, LV_OBJ_FLAG_HIDDEN);
+
+    /* Scrolling ticker — shown only for image combinations */
+    p_story_ticker = lv_label_create(scr);
+    lv_obj_set_width(p_story_ticker, SCREEN_W - 10);
+    lv_obj_set_style_text_opa(p_story_ticker, LV_OPA_COVER, 0);
+    lv_label_set_long_mode(p_story_ticker, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_style_text_color(p_story_ticker, lv_color_white(), 0);
+    lv_obj_set_style_text_font(p_story_ticker, &lv_font_montserrat_14_hr, 0);
+    lv_obj_set_style_anim_speed(p_story_ticker, 45, 0);
+    lv_obj_align(p_story_ticker, LV_ALIGN_TOP_MID, 0, 160);
+    lv_obj_add_flag(p_story_ticker, LV_OBJ_FLAG_HIDDEN);
+
+    /* "Još jednom!" button */
     lv_obj_t *btn = lv_btn_create(scr);
     lv_obj_set_size(btn, 180, 36);
     lv_obj_align(btn, LV_ALIGN_BOTTOM_MID, 0, -5);
@@ -381,63 +352,7 @@ static void _build_story(lv_obj_t *scr)
     lv_obj_center(lbl);
 }
 
-/* ── story generation ─────────────────────────────────────────────────── */
-
-static void _generate_story(void)
-{
-    snprintf(s_story_buf, sizeof(s_story_buf),
-             s_story_tmpl[s_sel[SEL_MOOD]],
-             s_hero[s_sel[SEL_HERO]],
-             s_animal[s_sel[SEL_ANIMAL]],
-             s_world_in[s_sel[SEL_WORLD]]);
-}
-
-/* ── helpers ──────────────────────────────────────────────────────────── */
-
-static void _go_to(int idx)
-{
-    s_current_screen = idx;
-    lv_scr_load_anim(p_screens[idx], LV_SCR_LOAD_ANIM_FADE_ON, 200, 0, false);
-}
-
-/* ── event callbacks ──────────────────────────────────────────────────── */
-
-static void _start_btn_cb(lv_event_t *e)
-{
-    (void)e;
-    _go_to(1);
-}
-
-static void _option_btn_cb(lv_event_t *e)
-{
-    int data   = (int)(intptr_t)lv_event_get_user_data(e);
-    int param  = data / 4;
-    int option = data % 4;
-
-    s_sel[param] = option;
-
-    if(param < 3) {
-        /* advance to next parameter screen (screens 1–4 map to params 0–3) */
-        _go_to(param + 2);
-    } else {
-        /* all four params chosen — generate and display the story */
-        _generate_story();
-        if(p_story_label) {
-            lv_label_set_text(p_story_label, s_story_buf);
-        }
-        _go_to(5);
-    }
-}
-
-static void _again_btn_cb(lv_event_t *e)
-{
-    (void)e;
-    _go_to(0);
-}
-
-/* ── audio test screen ────────────────────────────────────────────────── */
-
-static void _build_audio_test(lv_obj_t *scr)
+static void _build_babyphone(lv_obj_t *scr)
 {
     /* Title bar */
     lv_obj_t *bar = lv_obj_create(scr);
@@ -450,129 +365,208 @@ static void _build_audio_test(lv_obj_t *scr)
     lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *title = lv_label_create(bar);
-    lv_label_set_text(title, "Test Zvucnika");
+    lv_label_set_text(title, "Babyphone");
     lv_obj_set_style_text_color(title, lv_color_white(), 0);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_16_hr, 0);
     lv_obj_center(title);
 
     /* Status label */
-    p_audio_status_label = lv_label_create(scr);
-    lv_label_set_text(p_audio_status_label, "Status: Zaustavljeno");
-    lv_obj_set_style_text_color(p_audio_status_label, lv_color_hex(0xAAAAAA), 0);
-    lv_obj_set_style_text_font(p_audio_status_label, &lv_font_montserrat_14_hr, 0);
-    lv_obj_align(p_audio_status_label, LV_ALIGN_TOP_MID, 0, 45);
+    p_baby_status_lbl = lv_label_create(scr);
+    lv_label_set_text(p_baby_status_lbl, "Status: Zaustavljeno");
+    lv_obj_set_style_text_color(p_baby_status_lbl, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_set_style_text_font(p_baby_status_lbl, &lv_font_montserrat_14_hr, 0);
+    lv_obj_align(p_baby_status_lbl, LV_ALIGN_TOP_LEFT, 10, 45);
 
-    /* 2×2 frequency button grid */
-    static const uint32_t s_freqs[4]             = {220, 440, 880, 1760};
-    static const char * const s_freq_labels[4]   = {"220 Hz", "440 Hz", "880 Hz", "1760 Hz"};
+    /* Last capture time label */
+    p_baby_time_lbl = lv_label_create(scr);
+    lv_label_set_text(p_baby_time_lbl, "Zadnja snimka: --:--:--");
+    lv_obj_set_style_text_color(p_baby_time_lbl, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_set_style_text_font(p_baby_time_lbl, &lv_font_montserrat_14_hr, 0);
+    lv_obj_align(p_baby_time_lbl, LV_ALIGN_TOP_LEFT, 10, 70);
 
-    static const int BW = 140, BH = 50, H_GAP = 10, V_GAP = 5;
-    int x0 = (SCREEN_W - 2 * BW - H_GAP) / 2;  /* = 15 */
-    int y0 = 70;
+    /* URL label — updated when entering the screen */
+    p_baby_url_lbl = lv_label_create(scr);
+    lv_label_set_long_mode(p_baby_url_lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(p_baby_url_lbl, SCREEN_W - 20);
+    lv_label_set_text(p_baby_url_lbl, "URL: http://?.?.?.?/baby");
+    lv_obj_set_style_text_color(p_baby_url_lbl, lv_color_white(), 0);
+    lv_obj_set_style_text_font(p_baby_url_lbl, &lv_font_montserrat_14_hr, 0);
+    lv_obj_align(p_baby_url_lbl, LV_ALIGN_TOP_LEFT, 10, 100);
 
-    for(int i = 0; i < 4; i++) {
-        int col = i % 2;
-        int row = i / 2;
-        int x   = x0 + col * (BW + H_GAP);
-        int y   = y0 + row * (BH + V_GAP);
-
-        lv_obj_t *btn = lv_btn_create(scr);
-        lv_obj_set_size(btn, BW, BH);
-        lv_obj_align(btn, LV_ALIGN_TOP_LEFT, x, y);
-        lv_obj_set_style_bg_color(btn, lv_color_hex(MID_BLUE), 0);
-        lv_obj_set_style_border_color(btn, lv_color_hex(ACCENT), 0);
-        lv_obj_set_style_border_width(btn, 1, 0);
-        lv_obj_set_style_radius(btn, 8, 0);
-
-        lv_obj_t *lbl = lv_label_create(btn);
-        lv_label_set_text(lbl, s_freq_labels[i]);
-        lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16_hr, 0);
-        lv_obj_center(lbl);
-
-        lv_obj_add_event_cb(btn, _audio_freq_btn_cb, LV_EVENT_CLICKED,
-                            (void *)(uintptr_t)s_freqs[i]);
-    }
-
-    /* Stop button */
+    /* [Stop] button — left side */
     lv_obj_t *stop_btn = lv_btn_create(scr);
     lv_obj_set_size(stop_btn, 130, 36);
-    lv_obj_align(stop_btn, LV_ALIGN_BOTTOM_LEFT, 15, -10);
+    lv_obj_align(stop_btn, LV_ALIGN_BOTTOM_LEFT, 10, -10);
     lv_obj_set_style_bg_color(stop_btn, lv_color_hex(ACCENT), 0);
     lv_obj_set_style_radius(stop_btn, 8, 0);
-    lv_obj_add_event_cb(stop_btn, _audio_stop_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(stop_btn, _baby_stop_btn_cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *stop_lbl = lv_label_create(stop_btn);
     lv_label_set_text(stop_lbl, "Stop");
     lv_obj_set_style_text_color(stop_lbl, lv_color_white(), 0);
-    lv_obj_set_style_text_font(stop_lbl, &lv_font_montserrat_16_hr, 0);
+    lv_obj_set_style_text_font(stop_lbl, &lv_font_montserrat_14_hr, 0);
     lv_obj_center(stop_lbl);
 
-    /* Back button */
+    /* [Nazad] button — right side */
     lv_obj_t *back_btn = lv_btn_create(scr);
     lv_obj_set_size(back_btn, 130, 36);
-    lv_obj_align(back_btn, LV_ALIGN_BOTTOM_RIGHT, -15, -10);
+    lv_obj_align(back_btn, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
     lv_obj_set_style_bg_color(back_btn, lv_color_hex(DARK_BLUE), 0);
-    lv_obj_set_style_border_color(back_btn, lv_color_hex(0x555555), 0);
+    lv_obj_set_style_border_color(back_btn, lv_color_hex(ACCENT), 0);
     lv_obj_set_style_border_width(back_btn, 1, 0);
     lv_obj_set_style_radius(back_btn, 8, 0);
-    lv_obj_add_event_cb(back_btn, _audio_back_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(back_btn, _baby_back_btn_cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *back_lbl = lv_label_create(back_btn);
     lv_label_set_text(back_lbl, "Nazad");
     lv_obj_set_style_text_color(back_lbl, lv_color_white(), 0);
-    lv_obj_set_style_text_font(back_lbl, &lv_font_montserrat_16_hr, 0);
+    lv_obj_set_style_text_font(back_lbl, &lv_font_montserrat_14_hr, 0);
     lv_obj_center(back_lbl);
 }
 
-static void _speaker_test_btn_cb(lv_event_t *e)
+/* ── helpers ──────────────────────────────────────────────────────────── */
+
+static void _go_to(int idx)
 {
-    (void)e;
-    _go_to(6);
+    s_current_screen = idx;
+    lv_scr_load_anim(p_screens[idx], LV_SCR_LOAD_ANIM_FADE_ON, 200, 0, false);
 }
 
-static void _audio_freq_btn_cb(lv_event_t *e)
+static void _update_baby_url(void)
 {
-    uint32_t freq = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
-    audio_test_play_tone(freq);
+    if (!p_baby_url_lbl) return;
 
-    if(p_audio_status_label) {
-        static char status_buf[32];
-        snprintf(status_buf, sizeof(status_buf), "Status: %lu Hz", (unsigned long)freq);
-        lv_label_set_text(p_audio_status_label, status_buf);
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (!netif) return;
+
+    esp_netif_ip_info_t ip_info;
+    if (esp_netif_get_ip_info(netif, &ip_info) != ESP_OK) return;
+
+    static char url_buf[48];
+    snprintf(url_buf, sizeof(url_buf), "URL: http://" IPSTR "/baby",
+             IP2STR(&ip_info.ip));
+    lv_label_set_text(p_baby_url_lbl, url_buf);
+}
+
+/* ── event callbacks ──────────────────────────────────────────────────── */
+
+static void _start_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    _go_to(1);
+}
+
+static void _test_audio_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    /* vitez(0) + suma(0) + pas(1) → /sdcard/audio/vitez-suma-pas.mp3 */
+    story_player_play(0, 0, 1);
+}
+
+static void _option_btn_cb(lv_event_t *e)
+{
+    int data   = (int)(intptr_t)lv_event_get_user_data(e);
+    int param  = data / 4;
+    int option = data % 4;
+
+    s_sel[param] = option;
+
+    if(param < 2) {
+        /* advance to next parameter screen (screens 1–3 map to params 0–2) */
+        _go_to(param + 2);
+    } else {
+        /* all three params chosen — start audio and show story screen */
+        int h = s_sel[SEL_HERO], w = s_sel[SEL_WORLD], a = s_sel[SEL_ANIMAL];
+
+        /* Check for combinations that have a scene image + story text */
+        const lv_img_dsc_t *scene      = NULL;
+        const char         *ticker_txt = NULL;
+        if (h == 0 && w == 0 && a == 1) {
+            scene      = &ui_img_vitezsumapas;
+            ticker_txt = "U dubokoj \xc5\xa1umi, \xc5\xbevio je hrabri vitez koji je \xc5\xa1titio sve \xc5\xbeivotin"
+                         "je od opasnosti. Njegov najvjerniji prijatelj bio je pas koji ga je pratio u svak"
+                         "oj avanturi. Zajedno su \xc4\x8duvali mir i pomagali svima kojima je bila potrebna pomo\xc4\x87.";
+        } else if (h == 2 && w == 1 && a == 2) {
+            scene      = &ui_img_robotsvemirsova;
+            ticker_txt = "U dalekom svemiru, mali robot putovao je izme\xc4\x91u zvijezda u potrazi za znanjem."
+                         " Na jednoj planeti upoznao je mudru sovu koja je \xc4\x8duvala drevne tajne svemira."
+                         " Zajedno su krenuli na putovanje kako bi otkrili nove svjetove.";
+        }
+
+        if (scene) {
+            lv_img_set_src(p_story_img, scene);
+            lv_obj_clear_flag(p_story_img, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(p_story_cont, LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(p_story_ticker, ticker_txt);
+            lv_obj_clear_flag(p_story_ticker, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            snprintf(s_story_buf, sizeof(s_story_buf),
+                     "%s  +  %s  +  %s\n\nReproducira se prica...",
+                     s_hero[h], s_world[w], s_animal[a]);
+            lv_label_set_text(p_story_label, s_story_buf);
+            lv_obj_clear_flag(p_story_cont, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(p_story_img, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(p_story_ticker, LV_OBJ_FLAG_HIDDEN);
+        }
+        story_player_play(h, w, a);
+        _go_to(4);
     }
 }
 
-static void _audio_stop_btn_cb(lv_event_t *e)
+static void _again_btn_cb(lv_event_t *e)
 {
     (void)e;
-    audio_test_stop();
-    if(p_audio_status_label) {
-        lv_label_set_text(p_audio_status_label, "Status: Zaustavljeno");
-    }
-}
-
-static void _audio_back_btn_cb(lv_event_t *e)
-{
-    (void)e;
-    audio_test_stop();
-    if(p_audio_status_label) {
-        lv_label_set_text(p_audio_status_label, "Status: Zaustavljeno");
-    }
+    story_player_stop();
     _go_to(0);
 }
 
-/* ── persistent clock (top layer) ────────────────────────────────────── */
-
-static void _clock_tick_cb(lv_timer_t *t)
+static void _babyphone_btn_cb(lv_event_t *e)
 {
-    (void)t;
-    time_t now       = time(NULL);
-    struct tm *tm_info = gmtime(&now);
-    static char buf[9];   /* "HH:MM:SS\0" */
-    snprintf(buf, sizeof(buf), "%02d:%02d:%02d",
-             tm_info->tm_hour, tm_info->tm_min, tm_info->tm_sec);
-    lv_label_set_text(p_clock_label, buf);
+    (void)e;
+    story_player_stop();
+    babyphone_start();
+    _update_baby_url();
+    if (p_baby_status_lbl) {
+        lv_label_set_text(p_baby_status_lbl, "Status: Aktivno");
+    }
+    _go_to(5);
+}
+
+static void _baby_stop_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    babyphone_stop();
+    if (p_baby_status_lbl) {
+        lv_label_set_text(p_baby_status_lbl, "Status: Zaustavljeno");
+    }
+}
+
+static void _baby_back_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    babyphone_stop();
+    if (p_baby_status_lbl) {
+        lv_label_set_text(p_baby_status_lbl, "Status: Zaustavljeno");
+    }
+    _go_to(0);   /* back to welcome */
+}
+
+/* Called by lv_async_call() from the babyphone task (Core 0) after capture */
+static void _baby_ui_refresh_cb(void *arg)
+{
+    (void)arg;
+    if (!p_baby_time_lbl) return;
+
+    uint32_t uptime_s = babyphone_last_capture_uptime();
+    uint32_t h = uptime_s / 3600U;
+    uint32_t m = (uptime_s % 3600U) / 60U;
+    uint32_t s = uptime_s % 60U;
+
+    static char time_buf[40];
+    snprintf(time_buf, sizeof(time_buf),
+             "Zadnja snimka: %02lu:%02lu:%02lu", (unsigned long)h,
+             (unsigned long)m, (unsigned long)s);
+    lv_label_set_text(p_baby_time_lbl, time_buf);
 }
 
 //---------------------------- INTERRUPT HANDLERS -----------------------------

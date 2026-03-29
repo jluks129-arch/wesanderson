@@ -14,6 +14,7 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_log.h"
+#include "mdns.h"
 
 //---------------------------------- MACROS -----------------------------------
 static const char *TAG = "app_main";
@@ -43,6 +44,11 @@ static void _on_got_ip(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     ip_event_got_ip_t *event = (ip_event_got_ip_t *)data;
     ESP_LOGI(TAG, "Connected — IP: " IPSTR, IP2STR(&event->ip_info.ip));
+
+    mdns_init();
+    mdns_hostname_set("bldk");
+    ESP_LOGI(TAG, "mDNS hostname: bldk.local");
+
     web_server_start();
 }
 
